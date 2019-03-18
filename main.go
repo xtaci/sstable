@@ -287,16 +287,19 @@ func sort2Disk(r io.Reader, memLimit int, mapper Mapper) int {
 type streamReader struct {
 	scanner *bufio.Scanner
 	str     string // the head element
-	ord     string
-	cnt     string
+	ord     int64
+	cnt     int64
 }
 
 func (sr *streamReader) next() bool {
 	if sr.scanner.Scan() {
 		strs := strings.Split(sr.scanner.Text(), ",")
+		if len(strs) < 3 { // data corruption
+			return false
+		}
 		sr.str = strs[0]
-		sr.ord = strs[1]
-		sr.cnt = strs[2]
+		sr.ord, _ = strconv.ParseInt(strs[1], 10, 64)
+		sr.cnt, _ = strconv.ParseInt(strs[2], 10, 64)
 		return true
 	}
 	return false
@@ -349,9 +352,7 @@ func merger(parts int) chan countedEntry {
 
 		for h.Len() > 0 {
 			sr := heap.Pop(h).(*streamReader)
-			ord, _ := strconv.ParseInt(sr.ord, 10, 64)
-			cnt, _ := strconv.ParseInt(sr.cnt, 10, 64)
-			ch <- countedEntry{sr.str, ord, cnt}
+			ch <- countedEntry{sr.str, sr.ord, sr.cnt}
 			if sr.next() {
 				heap.Push(h, sr)
 			}
