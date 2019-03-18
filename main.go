@@ -58,14 +58,13 @@ type dataSet struct {
 
 	idxPtr  int // point to next index place
 	idxSize int
-	swapbuf []byte
+	swapbuf [entrySize]byte
 }
 
 func newDataSet(sz int) *dataSet {
 	e := new(dataSet)
 	e.buf = make([]byte, sz)
 	e.dataPtr = sz
-	e.swapbuf = make([]byte, entrySize)
 	return e
 }
 
@@ -109,9 +108,9 @@ func (s *dataSet) Less(i, j int) bool {
 }
 
 func (s *dataSet) Swap(i, j int) {
-	copy(s.swapbuf, s.e(i))
+	copy(s.swapbuf[:], s.e(i))
 	copy(s.e(i), s.e(j))
-	copy(s.e(j), s.swapbuf)
+	copy(s.e(j), s.swapbuf[:])
 }
 
 // data set reader
