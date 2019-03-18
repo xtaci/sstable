@@ -42,7 +42,7 @@ func (v rawValue) ord() int64    { return int64(binary.LittleEndian.Uint64(v[:])
 func (v rawValue) bytes() []byte { return v[8:] }
 
 type entry struct {
-	str []byte
+	bts []byte
 	ord int64 // data order
 }
 
@@ -147,7 +147,7 @@ type memSortAggregator struct {
 
 func (h *memSortAggregator) Len() int { return len(h.sets) }
 func (h *memSortAggregator) Less(i, j int) bool {
-	return bytes.Compare(h.sets[i].elem.str, h.sets[j].elem.str) < 0
+	return bytes.Compare(h.sets[i].elem.bts, h.sets[j].elem.bts) < 0
 }
 func (h *memSortAggregator) Swap(i, j int)      { h.sets[i], h.sets[j] = h.sets[j], h.sets[i] }
 func (h *memSortAggregator) Push(x interface{}) { h.sets = append(h.sets, x.(*dataSetReader)) }
@@ -194,11 +194,11 @@ func (h *sorter) Serialize(w io.Writer) {
 		for agg.Len() > 0 {
 			esr = heap.Pop(agg).(*dataSetReader)
 			elem := esr.elem
-			if bytes.Compare(elem.str, last.str) == 0 { // condense output
+			if bytes.Compare(elem.bts, last.bts) == 0 { // condense output
 				last_cnt++
 			} else {
 				// TODO : need to define formal output format
-				fmt.Fprintf(w, "%v,%v,%v\n", string(last.str), last.ord, last_cnt)
+				fmt.Fprintf(w, "%v,%v,%v\n", string(last.bts), last.ord, last_cnt)
 				last = elem
 				last_cnt = 1
 				written++
@@ -207,7 +207,7 @@ func (h *sorter) Serialize(w io.Writer) {
 				heap.Push(agg, esr)
 			}
 		}
-		fmt.Fprintf(w, "%v,%v,%v\n", string(last.str), last.ord, last_cnt)
+		fmt.Fprintf(w, "%v,%v,%v\n", string(last.bts), last.ord, last_cnt)
 		written++
 		log.Println("written", written, "elements")
 		h.sets = nil
