@@ -192,6 +192,7 @@ func (h *sorter) Map(w io.Writer, mapper Mapper) {
 		for agg.Len() > 0 {
 			esr := heap.Pop(agg).(*dataSetReader)
 			r := mapper.Map(esr.elem)
+			w.Write(r)
 			if r != nil {
 				written++
 			}
@@ -405,10 +406,46 @@ func (m *countMapper) End() (ret []byte) {
 	return m.buf.Bytes()
 }
 
+// Reducer interface
+type Reducer interface {
+	Reduce(countedEntry)
+	End()
+}
+
+type uniqueReducer struct {
+	target    countedEntry
+	last      countedEntry
+	hasUnique bool
+}
+
+func (r *uniqueReducer) check() {
+	if r.last.cnt == 1 {
+		if !r.hasUnique {
+			r.target = r.last
+			r.hasUnique = true
+		} else if r.last.ord < r.target.ord {
+			r.target = r.last
+		}
+	}
+}
+
+func (r *uniqueReducer) Reduce(e countedEntry) {
+	if r.last.str == e.str {
+		r.last.cnt += e.cnt
+	} else {
+		r.check()
+		r.last = e
+	}
+}
+
+func (r *uniqueReducer) End() {
+	r.check()
+}
+
 // findUnique reads from r with a specified bufsize
 // and trys to find the first unique string in this file
 func findUnique(r io.Reader, memLimit int) {
-	// step.1 sort into file chunks
+	// step.1 sort into file chunks, mapping stage
 	parts := sort2Disk(r, memLimit, new(countMapper))
 	log.Println("generated", parts, "parts")
 	// step2. sequential output of all parts
@@ -417,54 +454,22 @@ func findUnique(r io.Reader, memLimit int) {
 
 	// step3. loop through the sorted string chan
 	// and find the unique string with lowest ord
-	var target_str string
-	var target_ord int64
-	var hasSet bool
-
-	var last_str string
-	var last_ord int64
-	var last_cnt int64
+	// reducing stage
+	reducer := new(uniqueReducer)
 	if e, ok := <-ch; ok {
-		last_str = e.str
-		last_ord = e.ord
-		last_cnt = e.cnt
+		reducer.Reduce(e)
 	} else {
 		log.Println("empty set")
 		return
 	}
-
-	compareTarget := func() {
-		if last_cnt == 1 {
-			// found new unique string, compare with the ordinal
-			if !hasSet {
-				target_str = last_str
-				target_ord = last_ord
-				hasSet = true
-			} else if last_ord < target_ord {
-				target_str = last_str
-				target_ord = last_ord
-			}
-		}
-	}
-
-	// read through the sorted string chan
 	for e := range ch {
-		if last_str == e.str {
-			last_cnt += e.cnt
-		} else {
-			compareTarget()
-			last_str = e.str
-			last_ord = e.ord
-			last_cnt = e.cnt
-		}
+		reducer.Reduce(e)
 	}
+	reducer.End()
 
-	// make sure the final words is considered
-	compareTarget()
-
-	if hasSet {
-		log.Println("Found the first unique string:", string(target_str), "appears at:", target_ord)
+	if reducer.hasUnique {
+		log.Println("Found the first unique element:", reducer.target)
 	} else {
-		log.Println("Unique string not found!")
+		log.Println("Unique element not found!")
 	}
 }
