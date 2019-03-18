@@ -192,8 +192,8 @@ func (h *sorter) Map(w io.Writer, mapper Mapper) {
 		for agg.Len() > 0 {
 			esr := heap.Pop(agg).(*dataSetReader)
 			r := mapper.Map(esr.elem)
-			w.Write(r)
 			if r != nil {
+				w.Write(r)
 				written++
 			}
 			if esr.next() {
