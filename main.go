@@ -38,12 +38,12 @@ func (e rawEntry) value(buf []byte) rawValue { return buf[e.ptr():][:e.sz()] }
 // line []byte
 type rawValue []byte
 
-func (v rawValue) ord() int64   { return int64(binary.LittleEndian.Uint64(v[:])) }
-func (v rawValue) line() []byte { return v[8:] }
+func (v rawValue) ord() int64    { return int64(binary.LittleEndian.Uint64(v[:])) }
+func (v rawValue) bytes() []byte { return v[8:] }
 
 type entry struct {
 	str []byte
-	ord int64
+	ord int64 // data order
 }
 
 // split large slice set into a group of small sets
@@ -68,8 +68,9 @@ func newDataSet(sz int) *dataSet {
 	return e
 }
 
-func (s *dataSet) Add(line []byte, ord int64) bool {
-	sz := len(line) + 8
+// Add bytes with it's data record order
+func (s *dataSet) Add(bts []byte, ord int64) bool {
+	sz := len(bts) + 8
 	if s.idxWritten+s.dataWritten+sz+entrySize >= len(s.buf) {
 		return false
 	}
@@ -78,7 +79,7 @@ func (s *dataSet) Add(line []byte, ord int64) bool {
 	s.dataPtr -= sz
 	s.dataWritten += sz
 	binary.LittleEndian.PutUint64(s.buf[s.dataPtr:], uint64(ord))
-	copy(s.buf[s.dataPtr+8:], line)
+	copy(s.buf[s.dataPtr+8:], bts)
 
 	// write idx
 	binary.LittleEndian.PutUint32(s.buf[s.idxPtr:], uint32(sz))
@@ -94,17 +95,17 @@ func (s *dataSet) e(i int) rawEntry {
 	return rawEntry(s.buf[i*entrySize : i*entrySize+entrySize])
 }
 
-// return the ith element in text form
+// return the ith element in object form
 func (s *dataSet) get(i int) entry {
 	v := s.e(i).value(s.buf)
-	return entry{v.line(), v.ord()}
+	return entry{v.bytes(), v.ord()}
 }
 
 func (s *dataSet) Len() int { return s.idxWritten / entrySize }
 func (s *dataSet) Less(i, j int) bool {
 	v1 := s.e(i).value(s.buf)
 	v2 := s.e(j).value(s.buf)
-	return bytes.Compare(v1.line(), v2.line()) < 0
+	return bytes.Compare(v1.bytes(), v2.bytes()) < 0
 }
 
 func (s *dataSet) Swap(i, j int) {
@@ -113,7 +114,7 @@ func (s *dataSet) Swap(i, j int) {
 	copy(s.e(j), s.swapbuf[:])
 }
 
-// data set reader
+// data set reader for heap aggregation
 type dataSetReader struct {
 	set  *dataSet
 	head int
@@ -157,14 +158,14 @@ func (h *memSortAggregator) Pop() interface{} {
 	return x
 }
 
-// words sorter for big memory
-type sortWords struct {
+// memory bounded sorter for big data
+type sorter struct {
 	sets    []*dataSet
 	setSize int
-	limit   int // max total memory usage
+	limit   int // max total memory usage for sorting
 }
 
-func (h *sortWords) Len() int {
+func (h *sorter) Len() int {
 	n := 0
 	for k := range h.sets {
 		n += h.sets[k].Len()
@@ -172,7 +173,7 @@ func (h *sortWords) Len() int {
 	return n
 }
 
-func (h *sortWords) Serialize(w io.Writer) {
+func (h *sorter) Serialize(w io.Writer) {
 	if len(h.sets) > 0 {
 		agg := new(memSortAggregator)
 		for k := range h.sets {
@@ -196,6 +197,7 @@ func (h *sortWords) Serialize(w io.Writer) {
 			if bytes.Compare(elem.str, last.str) == 0 { // condense output
 				last_cnt++
 			} else {
+				// TODO : need to define formal output format
 				fmt.Fprintf(w, "%v,%v,%v\n", string(last.str), last.ord, last_cnt)
 				last = elem
 				last_cnt = 1
@@ -213,24 +215,24 @@ func (h *sortWords) Serialize(w io.Writer) {
 }
 
 // Add controls the memory for every input
-func (h *sortWords) Add(line []byte, ord int64) bool {
+func (h *sorter) Add(bts []byte, ord int64) bool {
 	if h.sets == nil { // init first one
 		h.sets = []*dataSet{newDataSet(h.setSize)}
 	}
 
 	set := h.sets[len(h.sets)-1]
-	if !set.Add(line, ord) {
+	if !set.Add(bts, ord) {
 		if h.setSize*(len(h.sets)+1) > h.limit { // limit reached
 			return false
 		}
 		newSet := newDataSet(h.setSize)
 		h.sets = append(h.sets, newSet)
-		newSet.Add(line, ord)
+		newSet.Add(bts, ord)
 	}
 	return true
 }
 
-func (h *sortWords) init(limit int) {
+func (h *sorter) init(limit int) {
 	h.setSize = 1 << 24 // 16MB set
 	h.limit = limit
 	if h.limit < h.setSize {
@@ -242,13 +244,13 @@ func (h *sortWords) init(limit int) {
 // xxxxx,1234,1
 // aaaa,5678,10
 func sort2Disk(r io.Reader, memLimit int) int {
-	h := new(sortWords)
+	h := new(sorter)
 	h.init(memLimit)
 	var ord int64
 	parts := 0
 
 	// file based serialization
-	fileDump := func(hp *sortWords, path string) {
+	fileDump := func(hp *sorter, path string) {
 		f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0755)
 		if err != nil {
 			log.Fatal(err)
