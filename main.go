@@ -165,6 +165,12 @@ type sorter struct {
 	limit   int // max total memory usage for sorting
 }
 
+// a mapper defines a mapping for `entry` to  bytes
+type Mapper interface {
+	Map(entry) []byte
+	End() []byte
+}
+
 func (h *sorter) Len() int {
 	n := 0
 	for k := range h.sets {
@@ -173,7 +179,7 @@ func (h *sorter) Len() int {
 	return n
 }
 
-func (h *sorter) Serialize(w io.Writer) {
+func (h *sorter) Map(w io.Writer, mapper Mapper) {
 	if len(h.sets) > 0 {
 		agg := new(memSortAggregator)
 		for k := range h.sets {
@@ -182,33 +188,22 @@ func (h *sorter) Serialize(w io.Writer) {
 			heap.Push(agg, newDataSetReader(h.sets[k]))
 		}
 		log.Println("merging sorted sets to file")
-
 		written := 0
-		esr := heap.Pop(agg).(*dataSetReader)
-		last := esr.elem
-		last_cnt := 1
-		if esr.next() {
-			heap.Push(agg, esr)
-		}
-
 		for agg.Len() > 0 {
-			esr = heap.Pop(agg).(*dataSetReader)
-			elem := esr.elem
-			if bytes.Compare(elem.bts, last.bts) == 0 { // condense output
-				last_cnt++
-			} else {
-				// TODO : need to define formal output format
-				fmt.Fprintf(w, "%v,%v,%v\n", string(last.bts), last.ord, last_cnt)
-				last = elem
-				last_cnt = 1
+			esr := heap.Pop(agg).(*dataSetReader)
+			r := mapper.Map(esr.elem)
+			if r != nil {
 				written++
 			}
 			if esr.next() {
 				heap.Push(agg, esr)
 			}
 		}
-		fmt.Fprintf(w, "%v,%v,%v\n", string(last.bts), last.ord, last_cnt)
-		written++
+		if r := mapper.End(); r != nil {
+			w.Write(r)
+			written++
+		}
+
 		log.Println("written", written, "elements")
 		h.sets = nil
 	}
@@ -243,7 +238,7 @@ func (h *sorter) init(limit int) {
 // sort2Disk writes strings with it's ordinal and count
 // xxxxx,1234,1
 // aaaa,5678,10
-func sort2Disk(r io.Reader, memLimit int) int {
+func sort2Disk(r io.Reader, memLimit int, mapper Mapper) int {
 	h := new(sorter)
 	h.init(memLimit)
 	var ord int64
@@ -255,7 +250,7 @@ func sort2Disk(r io.Reader, memLimit int) int {
 		if err != nil {
 			log.Fatal(err)
 		}
-		hp.Serialize(f)
+		hp.Map(f, mapper)
 		runtime.GC()
 		if err := f.Close(); err != nil {
 			log.Fatal(err)
@@ -372,11 +367,49 @@ func merger(parts int) chan countedEntry {
 	return ch
 }
 
+// define a mapping function for counting
+type countMapper struct {
+	last    entry
+	lastCnt int
+	hasLast bool
+	buf     bytes.Buffer
+}
+
+func (m *countMapper) Map(e entry) (ret []byte) {
+	if !m.hasLast {
+		m.lastCnt = 1
+		m.hasLast = true
+		m.last = e
+		return nil
+	}
+
+	if bytes.Compare(e.bts, m.last.bts) == 0 { // counting
+		m.lastCnt++
+	} else {
+		// TODO : need to define formal output format
+		m.buf.Reset()
+		fmt.Fprintf(&m.buf, "%v,%v,%v\n", string(m.last.bts), m.last.ord, m.lastCnt)
+		ret = m.buf.Bytes()
+		m.last = e
+		m.lastCnt = 1
+	}
+	return
+}
+
+func (m *countMapper) End() (ret []byte) {
+	if !m.hasLast {
+		return nil
+	}
+	m.buf.Reset()
+	fmt.Fprintf(&m.buf, "%v,%v,%v\n", string(m.last.bts), m.last.ord, m.lastCnt)
+	return m.buf.Bytes()
+}
+
 // findUnique reads from r with a specified bufsize
 // and trys to find the first unique string in this file
 func findUnique(r io.Reader, memLimit int) {
 	// step.1 sort into file chunks
-	parts := sort2Disk(r, memLimit)
+	parts := sort2Disk(r, memLimit, new(countMapper))
 	log.Println("generated", parts, "parts")
 	// step2. sequential output of all parts
 	ch := merger(parts)
