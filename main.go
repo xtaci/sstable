@@ -71,7 +71,7 @@ func newDataSet(sz int) *dataSet {
 // Add bytes with it's data record order
 func (s *dataSet) Add(bts []byte, ord uint64) bool {
 	sz := len(bts) + 8
-	if s.idxWritten+s.dataWritten+sz+entrySize >= len(s.buf) {
+	if s.idxWritten+s.dataWritten+sz+entrySize > len(s.buf) {
 		return false
 	}
 
@@ -100,7 +100,7 @@ func (s *dataSet) Reset() {
 
 // return the ith entry in binary form
 func (s *dataSet) e(i int) rawEntry {
-	return rawEntry(s.buf[i*entrySize : i*entrySize+entrySize])
+	return rawEntry(s.buf[i*entrySize:][:entrySize])
 }
 
 // return the ith element in object form
@@ -195,13 +195,12 @@ func (h *sorter) Map(w io.Writer, mapper Mapper) {
 		for k := range h.sets {
 			log.Println("sorting sets#", k, "element count:", h.sets[k].Len())
 			wg.Add(1)
-			go func() {
-				sort.Sort(h.sets[k])
+			go func(set *dataSet) {
+				sort.Sort(set)
 				wg.Done()
-			}()
+			}(h.sets[k])
 		}
 		wg.Wait()
-
 		log.Println("merging sorted sets to file")
 		agg := new(memSortAggregator)
 		for k := range h.sets {
@@ -254,7 +253,7 @@ func (h *sorter) Add(bts []byte, ord uint64) bool {
 	}
 	set := h.sets[len(h.sets)-1]
 	if !set.Add(bts, ord) {
-		if h.setSize*(len(h.sets)+1) > h.limit { // limit reached
+		if h.setSize*(len(h.sets)+1) >= h.limit { // limit reached
 			return false
 		}
 		newSet := h.allocateNewSet()
@@ -268,7 +267,7 @@ func (h *sorter) init(limit int) {
 	h.setSize = limit / runtime.NumCPU()
 
 	// make sure one set is not larger than MaxUint32
-	if h.setSize >= math.MaxUint32 {
+	if h.setSize > math.MaxUint32 {
 		h.setSize = math.MaxUint32
 	}
 }
@@ -327,26 +326,29 @@ type streamReader struct {
 	bytes []byte // point to the head element
 	ord   uint64
 	cnt   uint64
-	buf   bytes.Buffer
+	szbuf [4]byte
+	buf   []byte
 }
 
 func (sr *streamReader) next() bool {
-	sr.buf.Reset()
-	_, err := io.CopyN(&sr.buf, sr.r, 4)
+	_, err := io.ReadFull(sr.r, sr.szbuf[:])
 	if err != nil {
 		return false
 	}
-	sz := binary.LittleEndian.Uint32(sr.buf.Bytes())
-	sr.buf.Reset()
-	_, err = io.CopyN(&sr.buf, sr.r, int64(sz))
+	sz := binary.LittleEndian.Uint32(sr.szbuf[:])
+	if cap(sr.buf) < int(sz) {
+		sr.buf = make([]byte, sz)
+	} else {
+		sr.buf = sr.buf[:sz]
+	}
+	_, err = io.ReadFull(sr.r, sr.buf)
 	if err != nil {
 		return false
 	}
 
-	bts := sr.buf.Bytes()
-	sr.ord = binary.LittleEndian.Uint64(bts)
-	sr.cnt = binary.LittleEndian.Uint64(bts[8:])
-	sr.bytes = bts[16:]
+	sr.ord = binary.LittleEndian.Uint64(sr.buf)
+	sr.cnt = binary.LittleEndian.Uint64(sr.buf[8:])
+	sr.bytes = sr.buf[16:]
 	return true
 }
 
@@ -436,9 +438,9 @@ func (m *countMapper) End() (ret []byte) {
 
 // Reducer interface
 type countedEntry struct {
-	str string
-	ord uint64
-	cnt uint64
+	bytes []byte // may changed in next read
+	ord   uint64
+	cnt   uint64
 }
 
 type Reducer interface {
@@ -453,30 +455,50 @@ type uniqueReducer struct {
 	hasLast   bool
 }
 
-func (r *uniqueReducer) check() {
+func (r *uniqueReducer) checkTarget() {
 	if r.last.cnt == 1 {
 		if !r.hasUnique {
-			r.target = r.last
+			r.target = r.deepcopy(r.last)
 			r.hasUnique = true
 		} else if r.last.ord < r.target.ord {
-			r.target = r.last
+			r.target = r.deepcopy(r.last)
 		}
 	}
 }
+
+func (r *uniqueReducer) deepcopy(e1 countedEntry) countedEntry {
+	e2 := e1
+	e2.bytes = make([]byte, len(e1.bytes))
+	copy(e2.bytes, e1.bytes)
+	return e2
+}
+
+func (r *uniqueReducer) updateLast(e countedEntry) {
+	r.last.ord = e.ord
+	r.last.cnt = e.cnt
+	sz := len(e.bytes)
+	if sz > cap(r.last.bytes) {
+		r.last.bytes = make([]byte, sz)
+	} else {
+		r.last.bytes = r.last.bytes[:sz]
+	}
+	copy(r.last.bytes, e.bytes)
+}
+
 func (r *uniqueReducer) Reduce(e countedEntry) {
 	if !r.hasLast {
-		r.last = e
+		r.updateLast(e)
 		r.hasLast = true
-	} else if r.last.str == e.str {
+	} else if bytes.Compare(r.last.bytes, e.bytes) == 0 {
 		r.last.cnt += e.cnt
 	} else {
-		r.check()
-		r.last = e
+		r.checkTarget()
+		r.updateLast(e)
 	}
 }
 
 func (r *uniqueReducer) End() {
-	r.check()
+	r.checkTarget()
 }
 
 // reduce from parts, apply with reducer
@@ -496,7 +518,7 @@ func reduce(parts int, r Reducer) {
 
 	for h.Len() > 0 {
 		sr := heap.Pop(h).(*streamReader)
-		r.Reduce(countedEntry{string(sr.bytes), sr.ord, sr.cnt})
+		r.Reduce(countedEntry{sr.bytes, sr.ord, sr.cnt})
 		if sr.next() {
 			heap.Push(h, sr)
 		}
@@ -523,7 +545,7 @@ func findUnique(r io.Reader, memLimit int) {
 	reduce(parts, reducer)
 
 	if reducer.hasUnique {
-		log.Println("Found the first unique element:", reducer.target)
+		log.Println("Found the first unique element:", string(reducer.target.bytes), reducer.target.ord)
 	} else {
 		log.Println("Unique element not found!")
 	}
