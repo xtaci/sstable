@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -114,6 +115,11 @@ func (s *dataSet) Swap(i, j int) {
 	copy(s.e(j), s.swapbuf[:])
 }
 
+// sort this set
+func (s *dataSet) Sort(wg *sync.WaitGroup) {
+
+}
+
 // data set reader for heap aggregation
 type dataSetReader struct {
 	set  *dataSet
@@ -182,11 +188,17 @@ func (h *sorter) Len() int {
 func (h *sorter) Map(w io.Writer, mapper Mapper) {
 	if len(h.sets) > 0 {
 		agg := new(memSortAggregator)
+		wg := new(sync.WaitGroup)
 		for k := range h.sets {
 			log.Println("sorting sets#", k)
-			sort.Sort(h.sets[k])
+			wg.Add(1)
+			go func() {
+				sort.Sort(h.sets[k])
+				wg.Done()
+			}()
 			heap.Push(agg, newDataSetReader(h.sets[k]))
 		}
+		wg.Wait()
 		log.Println("merging sorted sets to file")
 		written := 0
 		for agg.Len() > 0 {
@@ -229,8 +241,8 @@ func (h *sorter) Add(bts []byte, ord int64) bool {
 }
 
 func (h *sorter) init(limit int) {
-	h.setSize = 1 << 24 // 16MB set
 	h.limit = limit
+	h.setSize = limit / runtime.NumCPU()
 	if h.limit < h.setSize {
 		h.limit = h.setSize
 	}
