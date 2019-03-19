@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"os"
 	"runtime"
 	"sort"
@@ -22,29 +23,29 @@ import (
 
 // key-value construction
 // rawEntry binary format:
-// bytesSize int32
-// bytesPtr int32
+// bytesSize uint32
+// bytesPtr uint32
 type rawEntry []byte
 
 const entrySize = 8
 
-func (e rawEntry) sz() int32  { return int32(binary.LittleEndian.Uint32(e[:])) }
-func (e rawEntry) ptr() int32 { return int32(binary.LittleEndian.Uint32(e[4:])) }
+func (e rawEntry) sz() uint32  { return binary.LittleEndian.Uint32(e[:]) }
+func (e rawEntry) ptr() uint32 { return binary.LittleEndian.Uint32(e[4:]) }
 
 // value binds to specific bytes buffer
 func (e rawEntry) value(buf []byte) rawValue { return buf[e.ptr():][:e.sz()] }
 
 // value binary format
-// ord int64
+// ord uint64
 // line []byte
 type rawValue []byte
 
-func (v rawValue) ord() int64    { return int64(binary.LittleEndian.Uint64(v[:])) }
+func (v rawValue) ord() uint64   { return binary.LittleEndian.Uint64(v[:]) }
 func (v rawValue) bytes() []byte { return v[8:] }
 
 type entry struct {
 	bts []byte
-	ord int64 // data order
+	ord uint64 // data order
 }
 
 // split large slice set into a group of small sets
@@ -70,7 +71,7 @@ func newDataSet(sz int) *dataSet {
 }
 
 // Add bytes with it's data record order
-func (s *dataSet) Add(bts []byte, ord int64) bool {
+func (s *dataSet) Add(bts []byte, ord uint64) bool {
 	sz := len(bts) + 8
 	if s.idxWritten+s.dataWritten+sz+entrySize >= len(s.buf) {
 		return false
@@ -79,7 +80,7 @@ func (s *dataSet) Add(bts []byte, ord int64) bool {
 	// write data
 	s.dataPtr -= sz
 	s.dataWritten += sz
-	binary.LittleEndian.PutUint64(s.buf[s.dataPtr:], uint64(ord))
+	binary.LittleEndian.PutUint64(s.buf[s.dataPtr:], ord)
 	copy(s.buf[s.dataPtr+8:], bts)
 
 	// write idx
@@ -113,11 +114,6 @@ func (s *dataSet) Swap(i, j int) {
 	copy(s.swapbuf[:], s.e(i))
 	copy(s.e(i), s.e(j))
 	copy(s.e(j), s.swapbuf[:])
-}
-
-// sort this set
-func (s *dataSet) Sort(wg *sync.WaitGroup) {
-
 }
 
 // data set reader for heap aggregation
@@ -228,7 +224,7 @@ func (h *sorter) Map(w io.Writer, mapper Mapper) {
 }
 
 // Add controls the memory for every input
-func (h *sorter) Add(bts []byte, ord int64) bool {
+func (h *sorter) Add(bts []byte, ord uint64) bool {
 	if h.sets == nil { // init first one
 		h.sets = []*dataSet{newDataSet(h.setSize)}
 	}
@@ -248,8 +244,10 @@ func (h *sorter) Add(bts []byte, ord int64) bool {
 func (h *sorter) init(limit int) {
 	h.limit = limit
 	h.setSize = limit / runtime.NumCPU()
-	if h.limit < h.setSize {
-		h.limit = h.setSize
+
+	// make sure one set is not larger than MaxUint32
+	if h.setSize >= math.MaxUint32 {
+		h.setSize = math.MaxUint32
 	}
 }
 
@@ -258,7 +256,7 @@ func (h *sorter) init(limit int) {
 func sort2Disk(r io.Reader, memLimit int, mapper Mapper) int {
 	h := new(sorter)
 	h.init(memLimit)
-	var ord int64
+	var ord uint64
 	parts := 0
 
 	// file based serialization
