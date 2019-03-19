@@ -74,6 +74,11 @@ func generate10G() {
 	}
 }
 
+func TestReduce(t *testing.T) {
+	reducer := new(uniqueReducer)
+	reduce(22, reducer)
+}
+
 func TestFindUniqueString(t *testing.T) {
 	t0 := bytes.NewBufferString("   ")
 	findUnique(t0, 128*Mega)

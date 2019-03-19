@@ -323,11 +323,11 @@ func sort2Disk(r io.Reader, memLimit int, mapper Mapper) int {
 ////////////////////////////////////////////////////////////////////////////////
 // disk streaming stage
 type streamReader struct {
-	r   io.Reader
-	str string // the head element
-	ord uint64
-	cnt uint64
-	buf bytes.Buffer
+	r     io.Reader
+	bytes []byte // point to the head element
+	ord   uint64
+	cnt   uint64
+	buf   bytes.Buffer
 }
 
 func (sr *streamReader) next() bool {
@@ -346,14 +346,17 @@ func (sr *streamReader) next() bool {
 	bts := sr.buf.Bytes()
 	sr.ord = binary.LittleEndian.Uint64(bts)
 	sr.cnt = binary.LittleEndian.Uint64(bts[8:])
-	sr.str = string(bts[16:])
+	sr.bytes = bts[16:]
 	return true
 }
 
 func newStreamReader(r io.Reader) *streamReader {
 	sr := new(streamReader)
 	sr.r = bufio.NewReader(r)
-	return sr
+	if sr.next() {
+		return sr
+	}
+	return nil
 }
 
 // streamAggregator always pop the min string
@@ -361,8 +364,10 @@ type streamAggregator struct {
 	entries []*streamReader
 }
 
-func (h *streamAggregator) Len() int           { return len(h.entries) }
-func (h *streamAggregator) Less(i, j int) bool { return h.entries[i].str < h.entries[j].str }
+func (h *streamAggregator) Len() int { return len(h.entries) }
+func (h *streamAggregator) Less(i, j int) bool {
+	return bytes.Compare(h.entries[i].bytes, h.entries[j].bytes) < 0
+}
 func (h *streamAggregator) Swap(i, j int)      { h.entries[i], h.entries[j] = h.entries[j], h.entries[i] }
 func (h *streamAggregator) Push(x interface{}) { h.entries = append(h.entries, x.(*streamReader)) }
 func (h *streamAggregator) Pop() interface{} {
@@ -370,47 +375,6 @@ func (h *streamAggregator) Pop() interface{} {
 	x := h.entries[n-1]
 	h.entries = h.entries[0 : n-1]
 	return x
-}
-
-type countedEntry struct {
-	str string
-	ord uint64
-	cnt uint64
-}
-
-func merger(parts int) chan countedEntry {
-	ch := make(chan countedEntry, 4096)
-	go func() {
-		files := make([]*os.File, parts)
-		h := new(streamAggregator)
-		for i := 0; i < parts; i++ {
-			f, err := os.Open(fmt.Sprintf("part%v.dat", i))
-			if err != nil {
-				log.Fatal(err)
-			}
-			files[i] = f
-			sr := newStreamReader(f)
-			sr.next() // fetch first string,ord
-			heap.Push(h, sr)
-		}
-
-		for h.Len() > 0 {
-			sr := heap.Pop(h).(*streamReader)
-			ch <- countedEntry{sr.str, sr.ord, sr.cnt}
-			if sr.next() {
-				heap.Push(h, sr)
-			}
-		}
-		close(ch)
-
-		for _, f := range files[:] {
-			if err := f.Close(); err != nil {
-				log.Fatal(err)
-			}
-		}
-	}()
-
-	return ch
 }
 
 // define a mapping function for counting
@@ -471,6 +435,12 @@ func (m *countMapper) End() (ret []byte) {
 }
 
 // Reducer interface
+type countedEntry struct {
+	str string
+	ord uint64
+	cnt uint64
+}
+
 type Reducer interface {
 	Reduce(countedEntry)
 	End()
@@ -480,6 +450,7 @@ type uniqueReducer struct {
 	target    countedEntry
 	last      countedEntry
 	hasUnique bool
+	hasLast   bool
 }
 
 func (r *uniqueReducer) check() {
@@ -492,9 +463,11 @@ func (r *uniqueReducer) check() {
 		}
 	}
 }
-
 func (r *uniqueReducer) Reduce(e countedEntry) {
-	if r.last.str == e.str {
+	if !r.hasLast {
+		r.last = e
+		r.hasLast = true
+	} else if r.last.str == e.str {
 		r.last.cnt += e.cnt
 	} else {
 		r.check()
@@ -506,30 +479,48 @@ func (r *uniqueReducer) End() {
 	r.check()
 }
 
+// reduce from parts, apply with reducer
+func reduce(parts int, r Reducer) {
+	files := make([]*os.File, parts)
+	h := new(streamAggregator)
+	for i := 0; i < parts; i++ {
+		f, err := os.Open(fmt.Sprintf("part%v.dat", i))
+		if err != nil {
+			log.Fatal(err)
+		}
+		files[i] = f
+		if sr := newStreamReader(bufio.NewReaderSize(f, 1<<20)); sr != nil {
+			heap.Push(h, sr)
+		}
+	}
+
+	for h.Len() > 0 {
+		sr := heap.Pop(h).(*streamReader)
+		r.Reduce(countedEntry{string(sr.bytes), sr.ord, sr.cnt})
+		if sr.next() {
+			heap.Push(h, sr)
+		}
+	}
+	r.End()
+
+	for _, f := range files[:] {
+		if err := f.Close(); err != nil {
+			log.Fatal(err)
+		}
+	}
+
+}
+
 // findUnique reads from r with a specified bufsize
 // and trys to find the first unique string in this file
 func findUnique(r io.Reader, memLimit int) {
 	// step.1 sort into file chunks, mapping stage
 	parts := sort2Disk(r, memLimit, new(countMapper))
-	log.Println("generated", parts, "parts")
-	// step2. sequential output of all parts
-	ch := merger(parts)
-	log.Println("reducing multiple sstable")
-
-	// step3. loop through the sorted string chan
-	// and find the unique string with lowest ord
-	// reducing stage
+	log.Println("Generated", parts, "parts")
+	// step2. merge all sstable and provides a continous input
+	log.Println("Reducing from#", parts, "sstable(s)")
 	reducer := new(uniqueReducer)
-	if e, ok := <-ch; ok {
-		reducer.Reduce(e)
-	} else {
-		log.Println("empty set")
-		return
-	}
-	for e := range ch {
-		reducer.Reduce(e)
-	}
-	reducer.End()
+	reduce(parts, reducer)
 
 	if reducer.hasUnique {
 		log.Println("Found the first unique element:", reducer.target)
