@@ -244,8 +244,8 @@ func (h *sorter) allocateNewSet() *dataSet {
 		h.unused = h.unused[:sz-1]
 	} else {
 		newSet = newDataSet(h.setSize)
-		h.sets = append(h.sets, newSet)
 	}
+	h.sets = append(h.sets, newSet)
 	return newSet
 }
 
