@@ -228,7 +228,6 @@ func (h *sorter) Map(w io.Writer, mapper Mapper) {
 		log.Println("written", written, "elements")
 		for k := range h.sets {
 			h.sets[k].Reset()
-			fmt.Println(h.sets[k])
 		}
 		h.unused = h.sets
 		h.sets = nil
