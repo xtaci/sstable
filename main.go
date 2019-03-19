@@ -187,7 +187,7 @@ func (h *sorter) Len() int {
 
 func (h *sorter) Map(w io.Writer, mapper Mapper) {
 	if len(h.sets) > 0 {
-		agg := new(memSortAggregator)
+		// sort the sets in parallel
 		wg := new(sync.WaitGroup)
 		for k := range h.sets {
 			log.Println("sorting sets#", k)
@@ -196,10 +196,15 @@ func (h *sorter) Map(w io.Writer, mapper Mapper) {
 				sort.Sort(h.sets[k])
 				wg.Done()
 			}()
-			heap.Push(agg, newDataSetReader(h.sets[k]))
 		}
 		wg.Wait()
+
 		log.Println("merging sorted sets to file")
+		agg := new(memSortAggregator)
+		for k := range h.sets {
+			heap.Push(agg, newDataSetReader(h.sets[k]))
+		}
+
 		written := 0
 		for agg.Len() > 0 {
 			esr := heap.Pop(agg).(*dataSetReader)
