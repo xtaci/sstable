@@ -53,13 +53,13 @@ type entry struct {
 // and write idx forwards, as:
 // [key0,key1,...keyN,..... valueN, .... value0]
 type dataSet struct {
-	buf         []byte
+	buf []byte
+
 	idxWritten  int
 	dataWritten int
 	dataPtr     int // point to last non-writable place, dataPtr -1 will be writable
+	idxPtr      int // point to next index place
 
-	idxPtr  int // point to next index place
-	idxSize int
 	swapbuf [entrySize]byte
 }
 
@@ -90,6 +90,14 @@ func (s *dataSet) Add(bts []byte, ord uint64) bool {
 	s.idxWritten += entrySize
 
 	return true
+}
+
+// Reset to initial state for future use
+func (s *dataSet) Reset() {
+	s.dataPtr = len(s.buf)
+	s.dataWritten = 0
+	s.idxPtr = 0
+	s.idxWritten = 0
 }
 
 // return the ith entry in binary form
@@ -163,6 +171,7 @@ func (h *memSortAggregator) Pop() interface{} {
 // memory bounded sorter for big data
 type sorter struct {
 	sets    []*dataSet
+	unused  []*dataSet
 	setSize int
 	limit   int // max total memory usage for sorting
 }
@@ -219,6 +228,10 @@ func (h *sorter) Map(w io.Writer, mapper Mapper) {
 		}
 
 		log.Println("written", written, "elements")
+		for k := range h.sets {
+			h.sets[k].Reset()
+		}
+		h.unused = h.sets
 		h.sets = nil
 	}
 }
@@ -234,8 +247,17 @@ func (h *sorter) Add(bts []byte, ord uint64) bool {
 		if h.setSize*(len(h.sets)+1) > h.limit { // limit reached
 			return false
 		}
-		newSet := newDataSet(h.setSize)
-		h.sets = append(h.sets, newSet)
+
+		// allocate new set
+		var newSet *dataSet
+		if len(h.unused) > 0 {
+			sz := len(h.unused)
+			newSet = h.unused[sz-1]
+			h.unused = h.unused[:sz-1]
+		} else {
+			newSet = newDataSet(h.setSize)
+			h.sets = append(h.sets, newSet)
+		}
 		newSet.Add(bts, ord)
 	}
 	return true
@@ -282,8 +304,8 @@ func sort2Disk(r io.Reader, memLimit int, mapper Mapper) int {
 			h.Add(scanner.Bytes(), ord)
 		}
 		ord++
-
 	}
+
 	if err := scanner.Err(); err != nil {
 		log.Fatal("error reading from source")
 	}
