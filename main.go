@@ -515,7 +515,7 @@ func findUnique(r io.Reader, memLimit int) {
 	log.Println("generated", parts, "parts")
 	// step2. sequential output of all parts
 	ch := merger(parts)
-	log.Println("beginning merged sequential output")
+	log.Println("reducing multiple sstable")
 
 	// step3. loop through the sorted string chan
 	// and find the unique string with lowest ord
