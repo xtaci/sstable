@@ -236,28 +236,30 @@ func (h *sorter) Map(w io.Writer, mapper Mapper) {
 	}
 }
 
+func (h *sorter) allocateNewSet() *dataSet {
+	var newSet *dataSet
+	if len(h.unused) > 0 {
+		sz := len(h.unused)
+		newSet = h.unused[sz-1]
+		h.unused = h.unused[:sz-1]
+	} else {
+		newSet = newDataSet(h.setSize)
+		h.sets = append(h.sets, newSet)
+	}
+	return newSet
+}
+
 // Add controls the memory for every input
 func (h *sorter) Add(bts []byte, ord uint64) bool {
-	if h.sets == nil { // init first one
-		h.sets = []*dataSet{newDataSet(h.setSize)}
+	if len(h.sets) == 0 {
+		h.allocateNewSet()
 	}
-
 	set := h.sets[len(h.sets)-1]
 	if !set.Add(bts, ord) {
 		if h.setSize*(len(h.sets)+1) > h.limit { // limit reached
 			return false
 		}
-
-		// allocate new set
-		var newSet *dataSet
-		if len(h.unused) > 0 {
-			sz := len(h.unused)
-			newSet = h.unused[sz-1]
-			h.unused = h.unused[:sz-1]
-		} else {
-			newSet = newDataSet(h.setSize)
-			h.sets = append(h.sets, newSet)
-		}
+		newSet := h.allocateNewSet()
 		newSet.Add(bts, ord)
 	}
 	return true
