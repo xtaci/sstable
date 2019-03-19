@@ -291,7 +291,6 @@ func sort2Disk(r io.Reader, memLimit int, mapper Mapper) int {
 		bufw := bufio.NewWriterSize(f, 1<<20)
 		hp.Map(bufw, mapper)
 		bufw.Flush()
-		runtime.GC()
 		if err := f.Close(); err != nil {
 			log.Fatal(err)
 		}

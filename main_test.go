@@ -107,5 +107,5 @@ func TestFindUnique10G(t *testing.T) {
 	if err != nil {
 		log.Fatal(err)
 	}
-	findUnique(io.LimitReader(file, 10000*Mega), 5000*Mega)
+	findUnique(io.LimitReader(file, 10000*Mega), 2000*Mega)
 }
