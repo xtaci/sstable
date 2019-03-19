@@ -193,7 +193,7 @@ func (h *sorter) Map(w io.Writer, mapper Mapper) {
 		// sort the sets in parallel
 		wg := new(sync.WaitGroup)
 		for k := range h.sets {
-			log.Println("sorting sets#", k)
+			log.Println("sorting sets#", k, "element count:", h.sets[k].Len())
 			wg.Add(1)
 			go func() {
 				sort.Sort(h.sets[k])
@@ -228,6 +228,7 @@ func (h *sorter) Map(w io.Writer, mapper Mapper) {
 		log.Println("written", written, "elements")
 		for k := range h.sets {
 			h.sets[k].Reset()
+			fmt.Println(h.sets[k])
 		}
 		h.unused = h.sets
 		h.sets = nil
@@ -287,7 +288,9 @@ func sort2Disk(r io.Reader, memLimit int, mapper Mapper) int {
 		if err != nil {
 			log.Fatal(err)
 		}
-		hp.Map(f, mapper)
+		bufw := bufio.NewWriterSize(f, 1<<20)
+		hp.Map(bufw, mapper)
+		bufw.Flush()
 		runtime.GC()
 		if err := f.Close(); err != nil {
 			log.Fatal(err)
