@@ -12,8 +12,6 @@ import (
 	"os"
 	"runtime"
 	"sort"
-	"strconv"
-	"strings"
 	"sync"
 )
 
@@ -323,30 +321,36 @@ func sort2Disk(r io.Reader, memLimit int, mapper Mapper) int {
 ////////////////////////////////////////////////////////////////////////////////
 // disk streaming stage
 type streamReader struct {
-	scanner *bufio.Scanner
-	str     string // the head element
-	ord     int64
-	cnt     int64
+	r   io.Reader
+	str string // the head element
+	ord uint64
+	cnt uint64
+	buf bytes.Buffer
 }
 
 func (sr *streamReader) next() bool {
-	if sr.scanner.Scan() {
-		strs := strings.Split(sr.scanner.Text(), ",")
-		if len(strs) < 3 { // data corruption
-			return false
-		}
-		sr.str = strs[0]
-		sr.ord, _ = strconv.ParseInt(strs[1], 10, 64)
-		sr.cnt, _ = strconv.ParseInt(strs[2], 10, 64)
-		return true
+	sr.buf.Reset()
+	_, err := io.CopyN(&sr.buf, sr.r, 4)
+	if err != nil {
+		return false
 	}
-	return false
+	sz := binary.LittleEndian.Uint32(sr.buf.Bytes())
+	sr.buf.Reset()
+	_, err = io.CopyN(&sr.buf, sr.r, int64(sz))
+	if err != nil {
+		return false
+	}
+
+	bts := sr.buf.Bytes()
+	sr.ord = binary.LittleEndian.Uint64(bts)
+	sr.cnt = binary.LittleEndian.Uint64(bts[8:])
+	sr.str = string(bts[16:])
+	return true
 }
 
 func newStreamReader(r io.Reader) *streamReader {
 	sr := new(streamReader)
-	sr.scanner = bufio.NewScanner(r)
-	sr.scanner.Split(bufio.ScanLines)
+	sr.r = bufio.NewReader(r)
 	return sr
 }
 
@@ -368,8 +372,8 @@ func (h *streamAggregator) Pop() interface{} {
 
 type countedEntry struct {
 	str string
-	ord int64
-	cnt int64
+	ord uint64
+	cnt uint64
 }
 
 func merger(parts int) chan countedEntry {
@@ -410,9 +414,31 @@ func merger(parts int) chan countedEntry {
 // define a mapping function for counting
 type countMapper struct {
 	last    entry
-	lastCnt int
+	lastCnt uint64
 	hasLast bool
-	buf     bytes.Buffer
+	buf     []byte
+}
+
+func (m *countMapper) prepareBuffer(sz int) {
+	if cap(m.buf) < sz {
+		m.buf = make([]byte, sz)
+	} else {
+		m.buf = m.buf[:sz]
+	}
+}
+
+func (m *countMapper) writeLast() {
+	// output format
+	// size - 32bit
+	// ord 64bit
+	// cnt 64bit
+	// bts (size - 16)
+	sz := len(m.last.bts) + 8 + 8
+	m.prepareBuffer(sz + 4)
+	binary.LittleEndian.PutUint32(m.buf, uint32(sz))
+	binary.LittleEndian.PutUint64(m.buf[4:], m.last.ord)
+	binary.LittleEndian.PutUint64(m.buf[12:], m.lastCnt)
+	copy(m.buf[20:], m.last.bts)
 }
 
 func (m *countMapper) Map(e entry) (ret []byte) {
@@ -426,23 +452,20 @@ func (m *countMapper) Map(e entry) (ret []byte) {
 	if bytes.Compare(e.bts, m.last.bts) == 0 { // counting
 		m.lastCnt++
 	} else {
-		// TODO : need to define formal output format
-		m.buf.Reset()
-		fmt.Fprintf(&m.buf, "%v,%v,%v\n", string(m.last.bts), m.last.ord, m.lastCnt)
-		ret = m.buf.Bytes()
+		m.writeLast()
 		m.last = e
 		m.lastCnt = 1
+		return m.buf
 	}
-	return
+	return nil
 }
 
 func (m *countMapper) End() (ret []byte) {
 	if !m.hasLast {
 		return nil
 	}
-	m.buf.Reset()
-	fmt.Fprintf(&m.buf, "%v,%v,%v\n", string(m.last.bts), m.last.ord, m.lastCnt)
-	return m.buf.Bytes()
+	m.writeLast()
+	return m.buf
 }
 
 // Reducer interface
