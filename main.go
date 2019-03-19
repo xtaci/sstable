@@ -281,6 +281,7 @@ func sort2Disk(r io.Reader, memLimit int, mapper Mapper) int {
 	var ord uint64
 	parts := 0
 
+	log.Println("beginning sort with memory limited to:", memLimit, "bytes")
 	// file based serialization
 	fileDump := func(hp *sorter, path string) {
 		f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0755)
