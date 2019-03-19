@@ -253,9 +253,8 @@ func (h *sorter) init(limit int) {
 	}
 }
 
-// sort2Disk writes strings with it's ordinal and count
-// xxxxx,1234,1
-// aaaa,5678,10
+// sort2Disk sorts and maps the input and output to multiple
+// sorted files
 func sort2Disk(r io.Reader, memLimit int, mapper Mapper) int {
 	h := new(sorter)
 	h.init(memLimit)
