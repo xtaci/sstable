@@ -330,45 +330,55 @@ func (c countedEntry) cnt() uint64   { return binary.LittleEndian.Uint64(c[8:]) 
 type streamReader struct {
 	r     io.Reader
 	szbuf [4]byte
-	e     countedEntry
+	buf   []byte
 }
 
-func (sr *streamReader) next() countedEntry {
+func (sr *streamReader) head() []byte { return sr.buf }
+
+func (sr *streamReader) next() bool {
 	_, err := io.ReadFull(sr.r, sr.szbuf[:])
 	if err != nil {
-		return nil
+		return false
 	}
 	sz := binary.LittleEndian.Uint32(sr.szbuf[:])
-	if cap(sr.e) < int(sz) {
-		sr.e = make([]byte, sz)
+	if cap(sr.buf) < int(sz) {
+		sr.buf = make([]byte, sz)
 	} else {
-		sr.e = sr.e[:sz]
+		sr.buf = sr.buf[:sz]
 	}
-	_, err = io.ReadFull(sr.r, sr.e)
+	_, err = io.ReadFull(sr.r, sr.buf)
 	if err != nil {
-		return nil
+		return false
 	}
 
-	return sr.e
+	return true
 }
 
 func newStreamReader(r io.Reader) *streamReader {
 	sr := new(streamReader)
 	sr.r = bufio.NewReader(r)
-	if sr.next() != nil {
+	if sr.next() {
 		return sr
 	}
 	return nil
 }
 
 // streamAggregator always pop the min string
+type lessComparator func([]byte, []byte) bool
 type streamAggregator struct {
 	entries []*streamReader
+	less    lessComparator
+}
+
+func newStreamAggregator(less lessComparator) *streamAggregator {
+	agg := new(streamAggregator)
+	agg.less = less
+	return agg
 }
 
 func (h *streamAggregator) Len() int { return len(h.entries) }
 func (h *streamAggregator) Less(i, j int) bool {
-	return bytes.Compare(h.entries[i].e.bytes(), h.entries[j].e.bytes()) < 0
+	return h.less(h.entries[i].head(), h.entries[j].head())
 }
 func (h *streamAggregator) Swap(i, j int)      { h.entries[i], h.entries[j] = h.entries[j], h.entries[i] }
 func (h *streamAggregator) Push(x interface{}) { h.entries = append(h.entries, x.(*streamReader)) }
@@ -497,7 +507,11 @@ func (r *uniqueReducer) End() {
 // reduce from parts, apply with reducer
 func Reduce(parts int, r Reducer) {
 	files := make([]*os.File, parts)
-	h := new(streamAggregator)
+
+	less := func(left []byte, right []byte) bool {
+		return bytes.Compare(countedEntry(left).bytes(), countedEntry(right).bytes()) < 0
+	}
+	h := newStreamAggregator(less)
 	for i := 0; i < parts; i++ {
 		f, err := os.Open(fmt.Sprintf("part%v.dat", i))
 		if err != nil {
@@ -511,8 +525,8 @@ func Reduce(parts int, r Reducer) {
 
 	for h.Len() > 0 {
 		sr := heap.Pop(h).(*streamReader)
-		r.Reduce(sr.e)
-		if sr.next() != nil {
+		r.Reduce(sr.head())
+		if sr.next() {
 			heap.Push(h, sr)
 		}
 	}
