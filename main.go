@@ -321,19 +321,22 @@ func sort2Disk(r io.Reader, memLimit int, mapper Mapper) int {
 
 ////////////////////////////////////////////////////////////////////////////////
 // disk streaming stage
+type countedEntry []byte
+
+func (c countedEntry) bytes() []byte { return c[16:] }
+func (c countedEntry) ord() uint64   { return binary.LittleEndian.Uint64(c) }
+func (c countedEntry) cnt() uint64   { return binary.LittleEndian.Uint64(c[8:]) }
+
 type streamReader struct {
 	r     io.Reader
-	bytes []byte // point to the head element
-	ord   uint64
-	cnt   uint64
 	szbuf [4]byte
 	buf   []byte
 }
 
-func (sr *streamReader) next() bool {
+func (sr *streamReader) next() []byte {
 	_, err := io.ReadFull(sr.r, sr.szbuf[:])
 	if err != nil {
-		return false
+		return nil
 	}
 	sz := binary.LittleEndian.Uint32(sr.szbuf[:])
 	if cap(sr.buf) < int(sz) {
@@ -343,19 +346,16 @@ func (sr *streamReader) next() bool {
 	}
 	_, err = io.ReadFull(sr.r, sr.buf)
 	if err != nil {
-		return false
+		return nil
 	}
 
-	sr.ord = binary.LittleEndian.Uint64(sr.buf)
-	sr.cnt = binary.LittleEndian.Uint64(sr.buf[8:])
-	sr.bytes = sr.buf[16:]
-	return true
+	return sr.buf
 }
 
 func newStreamReader(r io.Reader) *streamReader {
 	sr := new(streamReader)
 	sr.r = bufio.NewReader(r)
-	if sr.next() {
+	if sr.next() != nil {
 		return sr
 	}
 	return nil
@@ -368,7 +368,7 @@ type streamAggregator struct {
 
 func (h *streamAggregator) Len() int { return len(h.entries) }
 func (h *streamAggregator) Less(i, j int) bool {
-	return bytes.Compare(h.entries[i].bytes, h.entries[j].bytes) < 0
+	return bytes.Compare(h.entries[i].buf, h.entries[j].buf) < 0
 }
 func (h *streamAggregator) Swap(i, j int)      { h.entries[i], h.entries[j] = h.entries[j], h.entries[i] }
 func (h *streamAggregator) Push(x interface{}) { h.entries = append(h.entries, x.(*streamReader)) }
@@ -437,12 +437,6 @@ func (m *countMapper) End() (ret []byte) {
 }
 
 // Reducer interface
-type countedEntry struct {
-	bytes []byte // may changed in next read
-	ord   uint64
-	cnt   uint64
-}
-
 type Reducer interface {
 	Reduce(countedEntry)
 	End()
@@ -451,46 +445,44 @@ type Reducer interface {
 type uniqueReducer struct {
 	target    countedEntry
 	last      countedEntry
+	count     uint64
 	hasUnique bool
 	hasLast   bool
 }
 
 func (r *uniqueReducer) checkTarget() {
-	if r.last.cnt == 1 {
+	if r.last.cnt() == 1 {
 		if !r.hasUnique {
 			r.target = r.deepcopy(r.last)
 			r.hasUnique = true
-		} else if r.last.ord < r.target.ord {
+		} else if r.last.ord() < r.target.ord() {
 			r.target = r.deepcopy(r.last)
 		}
 	}
 }
 
 func (r *uniqueReducer) deepcopy(e1 countedEntry) countedEntry {
-	e2 := e1
-	e2.bytes = make([]byte, len(e1.bytes))
-	copy(e2.bytes, e1.bytes)
+	e2 := make([]byte, len(e1))
+	copy(e2, e1)
 	return e2
 }
 
 func (r *uniqueReducer) updateLast(e countedEntry) {
-	r.last.ord = e.ord
-	r.last.cnt = e.cnt
-	sz := len(e.bytes)
-	if sz > cap(r.last.bytes) {
-		r.last.bytes = make([]byte, sz)
+	sz := len(e)
+	if sz > cap(r.last) {
+		r.last = make([]byte, sz)
 	} else {
-		r.last.bytes = r.last.bytes[:sz]
+		r.last = r.last[:sz]
 	}
-	copy(r.last.bytes, e.bytes)
+	copy(r.last, e)
 }
 
 func (r *uniqueReducer) Reduce(e countedEntry) {
 	if !r.hasLast {
 		r.updateLast(e)
 		r.hasLast = true
-	} else if bytes.Compare(r.last.bytes, e.bytes) == 0 {
-		r.last.cnt += e.cnt
+	} else if bytes.Compare(r.last.bytes(), e.bytes()) == 0 {
+		r.count += e.cnt()
 	} else {
 		r.checkTarget()
 		r.updateLast(e)
@@ -502,7 +494,7 @@ func (r *uniqueReducer) End() {
 }
 
 // reduce from parts, apply with reducer
-func reduce(parts int, r Reducer) {
+func Reduce(parts int, r Reducer) {
 	files := make([]*os.File, parts)
 	h := new(streamAggregator)
 	for i := 0; i < parts; i++ {
@@ -518,8 +510,8 @@ func reduce(parts int, r Reducer) {
 
 	for h.Len() > 0 {
 		sr := heap.Pop(h).(*streamReader)
-		r.Reduce(countedEntry{sr.bytes, sr.ord, sr.cnt})
-		if sr.next() {
+		r.Reduce(sr.buf)
+		if sr.next() != nil {
 			heap.Push(h, sr)
 		}
 	}
@@ -542,10 +534,10 @@ func findUnique(r io.Reader, memLimit int) {
 	// step2. merge all sstable and provides a continous input
 	log.Println("Reducing from#", parts, "sstable(s)")
 	reducer := new(uniqueReducer)
-	reduce(parts, reducer)
+	Reduce(parts, reducer)
 
 	if reducer.hasUnique {
-		log.Println("Found the first unique element:", string(reducer.target.bytes), reducer.target.ord)
+		log.Println("Found the first unique element:", string(reducer.target.bytes()), reducer.target.ord())
 	} else {
 		log.Println("Unique element not found!")
 	}

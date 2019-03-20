@@ -76,7 +76,7 @@ func generate10G() {
 
 func TestReduce(t *testing.T) {
 	reducer := new(uniqueReducer)
-	reduce(22, reducer)
+	Reduce(22, reducer)
 	if reducer.hasUnique {
 		log.Println("Found the first unique element:", reducer.target)
 	} else {
