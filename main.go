@@ -169,7 +169,7 @@ func (h *memSortAggregator) Pop() interface{} {
 // memory bounded sorter for big data
 type sorter struct {
 	sets    []*dataSet
-	unused  []*dataSet
+	free    []*dataSet
 	setSize int
 	limit   int // max total memory usage for sorting
 }
@@ -228,17 +228,17 @@ func (h *sorter) Map(w io.Writer, mapper Mapper) {
 		for k := range h.sets {
 			h.sets[k].Reset()
 		}
-		h.unused = h.sets
+		h.free = h.sets
 		h.sets = nil
 	}
 }
 
 func (h *sorter) allocateNewSet() *dataSet {
 	var newSet *dataSet
-	if len(h.unused) > 0 {
-		sz := len(h.unused)
-		newSet = h.unused[sz-1]
-		h.unused = h.unused[:sz-1]
+	last := len(h.free) - 1
+	if last >= 0 {
+		newSet = h.free[last]
+		h.free = h.free[:last]
 	} else {
 		newSet = newDataSet(h.setSize)
 	}
