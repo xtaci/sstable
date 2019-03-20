@@ -253,7 +253,7 @@ func (h *sorter) Add(bts []byte, ord uint64) bool {
 	}
 	set := h.sets[len(h.sets)-1]
 	if !set.Add(bts, ord) {
-		if h.setSize*(len(h.sets)+1) >= h.limit { // limit reached
+		if h.setSize*(len(h.sets)+1) > h.limit { // limit reached
 			return false
 		}
 		newSet := h.allocateNewSet()
