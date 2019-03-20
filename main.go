@@ -486,6 +486,7 @@ func (r *uniqueReducer) Reduce(e countedEntry) {
 	} else {
 		r.checkTarget()
 		r.updateLast(e)
+		r.count = e.cnt()
 	}
 }
 
