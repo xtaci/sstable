@@ -451,7 +451,7 @@ type uniqueReducer struct {
 }
 
 func (r *uniqueReducer) checkTarget() {
-	if r.last.cnt() == 1 {
+	if r.count == 1 {
 		if !r.hasUnique {
 			r.target = r.deepcopy(r.last)
 			r.hasUnique = true
