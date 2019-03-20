@@ -330,26 +330,26 @@ func (c countedEntry) cnt() uint64   { return binary.LittleEndian.Uint64(c[8:]) 
 type streamReader struct {
 	r     io.Reader
 	szbuf [4]byte
-	buf   []byte
+	e     countedEntry
 }
 
-func (sr *streamReader) next() []byte {
+func (sr *streamReader) next() countedEntry {
 	_, err := io.ReadFull(sr.r, sr.szbuf[:])
 	if err != nil {
 		return nil
 	}
 	sz := binary.LittleEndian.Uint32(sr.szbuf[:])
-	if cap(sr.buf) < int(sz) {
-		sr.buf = make([]byte, sz)
+	if cap(sr.e) < int(sz) {
+		sr.e = make([]byte, sz)
 	} else {
-		sr.buf = sr.buf[:sz]
+		sr.e = sr.e[:sz]
 	}
-	_, err = io.ReadFull(sr.r, sr.buf)
+	_, err = io.ReadFull(sr.r, sr.e)
 	if err != nil {
 		return nil
 	}
 
-	return sr.buf
+	return sr.e
 }
 
 func newStreamReader(r io.Reader) *streamReader {
@@ -368,7 +368,7 @@ type streamAggregator struct {
 
 func (h *streamAggregator) Len() int { return len(h.entries) }
 func (h *streamAggregator) Less(i, j int) bool {
-	return bytes.Compare(h.entries[i].buf, h.entries[j].buf) < 0
+	return bytes.Compare(h.entries[i].e.bytes(), h.entries[j].e.bytes()) < 0
 }
 func (h *streamAggregator) Swap(i, j int)      { h.entries[i], h.entries[j] = h.entries[j], h.entries[i] }
 func (h *streamAggregator) Push(x interface{}) { h.entries = append(h.entries, x.(*streamReader)) }
@@ -511,7 +511,7 @@ func Reduce(parts int, r Reducer) {
 
 	for h.Len() > 0 {
 		sr := heap.Pop(h).(*streamReader)
-		r.Reduce(sr.buf)
+		r.Reduce(sr.e)
 		if sr.next() != nil {
 			heap.Push(h, sr)
 		}
